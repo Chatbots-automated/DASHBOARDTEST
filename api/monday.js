@@ -6,20 +6,18 @@ export default async function handler(req, res) {
 
   const query = `
     query {
-      boards(ids: [${BOARD_ID}]) {
-        items {
+      items_by_board (board_id: ${BOARD_ID}, limit: 500) {
+        id
+        name
+        column_values {
           id
-          name
-          column_values {
-            id
+          text
+          type
+          ... on StatusValue {
+            label
+          }
+          ... on FormulaValue {
             text
-            type
-            ... on StatusValue {
-              label
-            }
-            ... on FormulaValue {
-              text
-            }
           }
         }
       }
@@ -51,7 +49,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: data.errors });
     }
 
-    const items = data.data.boards[0].items;
+    const items = data.data.items_by_board;
     console.log(`📦 Found ${items.length} items`);
 
     const filteredItems = items.filter((item) => {
