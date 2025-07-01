@@ -1,3 +1,24 @@
+boards(ids: [1645436514]) {
+  items {
+    ...
+  }
+}
+``>
+
+---
+
+### ❌ Error 2: `Cannot query field "title" on type "ColumnValue"`
+**Fix**: `title` is not a valid field on `ColumnValue`. You can use:
+- `id`
+- `text`
+- `type`
+- and fragments like `... on StatusValue { label }`
+
+---
+
+### ✅ ✅ Final working version
+
+```js
 export default async function handler(req, res) {
   const API_KEY = process.env.MONDAY_API_KEY;
   const BOARD_ID = 1645436514;
@@ -6,22 +27,20 @@ export default async function handler(req, res) {
 
   const query = `
     query {
-      items (board_ids: [${BOARD_ID}]) {
-        id
-        name
-        column_values {
+      boards(ids: [${BOARD_ID}]) {
+        items {
           id
-          title
-          text
-          type
-          ... on StatusValue {
-            label
-          }
-          ... on MirrorValue {
-            display_value
-          }
-          ... on FormulaValue {
+          name
+          column_values {
+            id
             text
+            type
+            ... on StatusValue {
+              label
+            }
+            ... on FormulaValue {
+              text
+            }
           }
         }
       }
@@ -53,7 +72,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: data.errors });
     }
 
-    const items = data.data.items;
+    const items = data.data.boards[0].items;
     console.log(`📦 Found ${items.length} items`);
 
     const filteredItems = items.filter((item) => {
@@ -66,6 +85,7 @@ export default async function handler(req, res) {
     console.log(`✅ Filtered ${filteredItems.length} items matching status`);
 
     const result = filteredItems.map((item) => {
+      const statusCol = item.column_values.find(col => col.type === "color");
       const totalSumCol = item.column_values.find(
         (col) => col.id === TOTAL_SUM_COLUMN_ID
       );
@@ -73,7 +93,7 @@ export default async function handler(req, res) {
       return {
         id: item.id,
         name: item.name,
-        status: item.column_values.find((col) => col.type === "color")?.label,
+        status: statusCol?.label || statusCol?.text || null,
         total_sum: totalSumCol?.text ?? null,
       };
     });
