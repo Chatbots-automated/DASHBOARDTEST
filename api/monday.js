@@ -1,4 +1,3 @@
-// /api/monday.js   –  no TS-only syntax
 export default async function handler(req, res) {
   /* ---------- CORS ---------- */
   res.setHeader('Access-Control-Allow-Origin',  '*');
@@ -6,40 +5,39 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  /* ---------- CONFIG ---------- */
+  /* ---------- env ---------- */
   const API_KEY = process.env.MONDAY_API_KEY;
-  if (!API_KEY) {
-    console.error('env var MONDAY_API_KEY is missing');
-    return res.status(500).json({error:'Server mis-config'});
-  }
+  if (!API_KEY) return res.status(500).json({error:'MONDAY_API_KEY missing'});
 
-  const BOARD_ID          = 1645436514;
-  const STATUS_COLUMN_ID  = 'status';        // Įrengta = 1, Atsiskaityta = 6
-  const TYPE_COLUMN_ID    = 'status6';       // B2C = 1, B2B = 2
-  const FORMULA_COLUMN_ID = 'formula_mkmp4x00';
-  const DATE_COLUMN_ID    = 'date8';
+  /* ---------- board/column IDs ---------- */
+  const BOARD_ID           = 1645436514;
+  const STATUS_COLUMN_ID   = 'status';          // 1, 6
+  const TYPE_COLUMN_ID     = 'status6';         // B2C=1 | B2B=2
+  const FORMULA_COLUMN_ID  = 'formula_mkmp4x00';// €
+  const DATE_COLUMN_ID     = 'date8';           // install date
 
-  const HEADERS = {
-    Authorization : API_KEY,
-    'Content-Type': 'application/json'
-  };
-
-  /* ---------- helper to run GraphQL ---------- */
+  /* ---------- GraphQL helper ---------- */
+  const HEADERS = {Authorization:API_KEY,'Content-Type':'application/json'};
   async function gql(query){
-    const r  = await fetch('https://api.monday.com/v2',
-      {method:'POST', headers:HEADERS, body:JSON.stringify({query})});
-    const txt = await r.text();
-    const json= JSON.parse(txt);
-    if (json.errors) throw new Error(JSON.stringify(json.errors,null,2));
+    const rsp = await fetch('https://api.monday.com/v2',{
+      method:'POST',headers:HEADERS,body:JSON.stringify({query})
+    });
+    const txt  = await rsp.text();
+    const json = JSON.parse(txt);
+    if (json.errors) {
+      console.error('⛔️ monday API error\nQuery:\n',query,
+                    '\nErrors:\n',JSON.stringify(json.errors,null,2));
+      throw new Error('monday API returned errors');
+    }
     return json.data;
   }
 
-  /* ---------- 1️⃣  collect *all* item IDs for a type ---------- */
+  /* ---------- 1️⃣  get **all** item IDs for one client-type ---------- */
   async function collectIds(typeIdx){
     const ids = [];
 
-    // first filtered page
-    let page = await gql(`
+    /* first page (with filters) */
+    const first = await gql(`
       query{
         boards(ids:${BOARD_ID}){
           items_page(limit:500,
@@ -48,34 +46,43 @@ export default async function handler(req, res) {
               {column_id:"${TYPE_COLUMN_ID}",compare_value:[${typeIdx}],operator:any_of}
             ]}
           ){
-            cursor items{ id }
+            cursor
+            items{ id }
           }
         }
-      }`).boards[0].items_page;
+      }`);
 
-    ids.push(...page.items.map(i=>i.id));
-    let cursor = page.cursor;
+    const firstPage = first?.boards?.[0]?.items_page;
+    if (!firstPage) return ids;            // nothing matched
 
-    // follow the cursor until null
-    while(cursor){
+    ids.push(...firstPage.items.map(i=>i.id));
+    let cursor = firstPage.cursor;
+
+    /* follow the cursor chain */
+    while (cursor) {
       const next = await gql(`
         query{
           next_items_page(limit:500, cursor:"${cursor}"){
-            cursor items{ id }
+            cursor
+            items{ id }
           }
-        }`).next_items_page;
-      ids.push(...next.items.map(i=>i.id));
-      cursor = next.cursor;
+        }`);
+
+      const page = next?.next_items_page;
+      if (!page) break;
+
+      ids.push(...page.items.map(i=>i.id));
+      cursor = page.cursor;                // null when no more pages
     }
     return ids;
   }
 
-  /* ---------- 2️⃣  fetch details in 100-item batches ---------- */
-  async function hydrate(ids,label){
+  /* ---------- 2️⃣  hydrate in 100-item batches & normalise numbers ---------- */
+  async function hydrate(ids, label){
     const rows = [];
-    for(let i=0;i<ids.length;i+=100){
-      const slice = ids.slice(i,i+100).join(',');
-      const items = await gql(`
+    for (let i=0;i<ids.length;i+=100){
+      const slice = ids.slice(i, i+100).join(',');
+      const data  = await gql(`
         query{
           items(ids:[${slice}]){
             id name
@@ -86,21 +93,21 @@ export default async function handler(req, res) {
               "${DATE_COLUMN_ID}"
             ]){
               id
-              ... on FormulaValue{display_value}
-              ... on StatusValue {label}
-              ... on DateValue   {date}
+              ... on FormulaValue {display_value}
+              ... on StatusValue  {label}
+              ... on DateValue    {date}
             }
           }
-        }`).items;
+        }`);
 
-      for(const it of items){
-        const cv   = Object.fromEntries(it.column_values.map(c=>[c.id,c]));
-        const raw  = cv[FORMULA_COLUMN_ID]?.display_value ?? '';
+      for (const it of (data.items || [])){
+        const cv  = Object.fromEntries(it.column_values.map(c=>[c.id,c]));
+        const raw = cv[FORMULA_COLUMN_ID]?.display_value ?? '';
         if (!raw || raw==='No result') continue;
 
-        // normalise EU number “1.234.567,89”  /  “123,45”
+        // EU-number → float
         const num = parseFloat(
-          (raw.match(/\./g)||[]).length>=2
+          (raw.match(/\./g)||[]).length >= 2
             ? raw.replace(/\./g,'').replace(',','.')
             : raw.replace(',','.')
         );
@@ -116,22 +123,33 @@ export default async function handler(req, res) {
         });
       }
     }
+
     const total = rows.reduce((s,r)=>s+r.sum_eur,0);
     return {
-      meta : { type:label, total_items:rows.length,
-               total_sum_eur:+total.toFixed(2) },
+      meta : {
+        type: label,
+        total_items : rows.length,
+        total_sum_eur : +total.toFixed(2)
+      },
       items: rows
     };
   }
 
   /* ---------- RUN ---------- */
-  try{
-    const [b2cIds,b2bIds] = await Promise.all([collectIds(1),collectIds(2)]);
-    const [b2c,b2b]       = await Promise.all([hydrate(b2cIds,'B2C'),
-                                               hydrate(b2bIds,'B2B')]);
-    res.status(200).json({b2c,b2b});
-  }catch(e){
-    console.error(e);
-    res.status(500).json({error:'monday API error',details:e.message||e});
+  try {
+    const [b2cIds, b2bIds] = await Promise.all([
+      collectIds(1),               // B2C
+      collectIds(2)                // B2B
+    ]);
+
+    const [b2c, b2b] = await Promise.all([
+      hydrate(b2cIds, 'B2C'),
+      hydrate(b2bIds, 'B2B')
+    ]);
+
+    res.status(200).json({b2c, b2b});
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({error:'monday API error', details: err.message || err});
   }
 }
