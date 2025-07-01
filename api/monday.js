@@ -6,30 +6,31 @@ export default async function handler(req, res) {
 
   console.log("✅ Handler invoked");
 
-  const statusFilterQuery = `
-    query {
-      boards(ids: ${BOARD_ID}) {
-        items_page(
-          limit: 500,
-          query_params: {
-            rules: [
-              {
-                column_id: "${STATUS_COLUMN_ID}",
-                compare_value: ["Įrengta"],
-                operator: any_of
-              }
-            ]
-          }
-        ) {
-          cursor
-          items {
-            id
-            name
-          }
+ const statusFilterQuery = `
+  query {
+    boards(ids: ${BOARD_ID}) {
+      items_page(
+        limit: 500,
+        query_params: {
+          rules: [
+            {
+              column_id: "${STATUS_COLUMN_ID}",
+              compare_value: [1],   // ✅ this is now correct
+              operator: any_of
+            }
+          ]
+        }
+      ) {
+        cursor
+        items {
+          id
+          name
         }
       }
     }
-  `;
+  }
+`;
+
 
   console.log("📡 STEP 1: Fetching item IDs with status = Įrengta");
   console.log("📝 STEP 1 QUERY:\n", statusFilterQuery);
