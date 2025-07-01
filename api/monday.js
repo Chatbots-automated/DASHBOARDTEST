@@ -1,106 +1,113 @@
 /**
- * /api/monday.js
- * Fetch *all* items that live in groups new_group50055 / new_group89286,
- * bucket them by “status6” (B2C / B2B), and return totals + raw rows.
+ * /api/monday.js   ──  DEBUG build ───────────────────────────────
  */
 export default async function handler(req, res) {
-  /* –– CORS –– */
+  /*──────────────────── CORS */
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  /* –– ENV –– */
+  /*──────────────────── ENV check */
   const API_KEY = process.env.MONDAY_API_KEY;
-  if (!API_KEY) return res.status(500).json({error:'MONDAY_API_KEY missing'});
+  if (!API_KEY) {
+    console.error('⛔️  env MONDAY_API_KEY missing');
+    return res.status(500).json({error:'MONDAY_API_KEY missing'});
+  }
 
-  /* –– IDs & labels –– */
-  const BOARD_ID   = 1645436514;
-  const GROUP_IDS  = ['new_group50055','new_group89286']; // <- target groups
-  const TYPE_COL   = 'status6';           // B2C / B2B
-  const EUR_COL    = 'formula_mkmp4x00';  // €
-  const DATE_COL   = 'date8';
-  const ACCEPTED   = new Set(['B2C','B2B']);
+  /*──────────────────── IDs */
+  const BOARD_ID  = 1645436514;
+  const GROUP_IDS = ['new_group50055','new_group89286'];
 
-  /* –– tiny gql helper w/ back-off –– */
+  const TYPE_COL  = 'status6';          // B2C / B2B
+  const EUR_COL   = 'formula_mkmp4x00'; // €
+  const DATE_COL  = 'date8';
+  const ACCEPTED  = new Set(['B2C','B2B']);
+
+  /*──────────────────── helpers */
   const HEADERS = {Authorization:API_KEY,'Content-Type':'application/json'};
-  async function gql(query){
+
+  async function gql(query, variables = undefined) {
+    console.log('→ gql:', query.replace(/\s+/g,' ').slice(0,120)+'…');
+    const body = variables ? { query, variables } : { query };
     while (true) {
-      const r  = await fetch('https://api.monday.com/v2',
-                  {method:'POST',headers:HEADERS,body:JSON.stringify({query})});
-      if (r.status === 429) {                        // minute-rate hit
-        const wait = (+r.headers.get('Retry-After')||1)*1000;
-        await new Promise(t=>setTimeout(t,wait));    // back-off
+      const r = await fetch('https://api.monday.com/v2',
+                {method:'POST', headers:HEADERS, body:JSON.stringify(body)});
+      if (r.status === 429) {                         // minute-rate
+        const wait = (+r.headers.get('Retry-After') || 1)*1000;
+        console.log(`⚠️  429 – waiting ${wait}ms`);
+        await new Promise(t=>setTimeout(t, wait));
         continue;
       }
-      const j = await r.json();
-      if (j.errors){
-        const code = j.errors[0]?.extensions?.code || '';
-        if (code.includes('Complexity') || code.includes('Rate')) {
-          // wait 1 s – lets the sliding window refill
-          await new Promise(t=>setTimeout(t, 1100));
+      const txt = await r.text();
+      console.log('← raw json:', txt.slice(0,200)+'…');
+      const j   = JSON.parse(txt);
+      if (j.errors) {
+        const code = j.errors[0]?.extensions?.code;
+        console.error('⛔️  GraphQL error', j.errors);
+        if (code?.includes('Complexity') || code?.includes('Rate')) {
+          await new Promise(t=>setTimeout(t,1100));   // back-off
           continue;
         }
-        console.error(j.errors); throw new Error('Monday API error');
+        throw new Error('Monday API error');
       }
       return j.data;
     }
   }
 
   const euro = raw => !raw||raw==='No result'
-                        ? null
-                        : parseFloat(raw.replace(/[.\s\u00A0]/g,'').replace(',','.'));
+                       ? null
+                       : parseFloat(raw.replace(/[.\s\u00A0]/g,'').replace(',','.'));
 
-  /* –– 1️⃣  gather every item-id in the two groups –– */
+  /*──────────────────── 1️⃣ gather ALL ids from both groups */
   async function gatherIds() {
-    const ids = [];
-
-    // literal list of group ids inside the rule ↓
-    const rule   = GROUP_IDS.map(g=>`"${g}"`).join(',');
-
-    /* first page */
-    let page = await gql(`
+    const rule = GROUP_IDS.map(g=>`"${g}"`).join(',');
+    const first = await gql(`
       query {
+        complexity { before after query }         # debug
         boards(ids:${BOARD_ID}) {
           items_page(
-            limit:500,
+            limit:500
             query_params:{rules:[
               {column_id:"group",compare_value:[${rule}],operator:any_of}
             ]}
           ){
             cursor
-            items{ id }
+            items { id }
           }
         }
-      }`).boards[0].items_page;
+      }`);
+    const page0 = first?.boards?.[0]?.items_page;
+    if (!page0) {
+      console.error('⚠️  No items_page returned'); return [];
+    }
+    const ids = page0.items.map(i=>i.id);
+    console.log(`page-0 : got ${ids.length} ids`);
+    let cursor = page0.cursor;
 
-    ids.push(...page.items.map(i=>i.id));
-    let cursor = page.cursor;
-
-    /* follow the board-level cursor until null */
     while (cursor) {
-      page = await gql(`
-        query{
-          next_items_page(limit:500,cursor:"${cursor}"){
-            cursor items{ id }
-          }
-        }`).next_items_page;
+      const next = await gql(`
+        query { next_items_page(limit:500, cursor:"${cursor}") {
+          cursor items { id } } }`);
+      const page = next.next_items_page;
       if (!page?.items?.length) break;
       ids.push(...page.items.map(i=>i.id));
+      console.log(`page-n : +${page.items.length}  (total ${ids.length})`);
       cursor = page.cursor;
     }
     return ids;
   }
 
-  /* –– 2️⃣  hydrate in 100-id batches –– */
-  async function hydrate(allIds){
+  /*──────────────────── 2️⃣ hydrate & bucket */
+  async function hydrate(allIds) {
     const bucket = {B2C:[], B2B:[]};
 
-    for (let i=0;i<allIds.length;i+=100){
-      const slice = allIds.slice(i,i+100).join(',');
+    for (let i=0;i<allIds.length;i+=100) {
+      const slice = allIds.slice(i,i+100);
+      console.log(`hydrating IDs ${i}‒${i+slice.length-1}`);
       const d = await gql(`
-        query{
-          items(ids:[${slice}]){
+        query($ids:[ID!]!){
+          items(ids:$ids){
             id name
             column_values(ids:["${EUR_COL}","${TYPE_COL}","${DATE_COL}"]){
               id
@@ -109,38 +116,37 @@ export default async function handler(req, res) {
               ... on DateValue   {date}
             }
           }
-        }`);
-      for (const it of d.items){
+        }`, {ids: slice});
+
+      for (const it of d.items || []) {
         const cv   = Object.fromEntries(it.column_values.map(c=>[c.id,c]));
         const type = cv[TYPE_COL]?.label;
         if (!ACCEPTED.has(type)) continue;
-
-        const num = euro(cv[EUR_COL]?.display_value);
+        const num  = euro(cv[EUR_COL]?.display_value);
         if (num==null) continue;
 
         bucket[type].push({
-          id:it.id,
-          name:it.name,
-          type,
+          id:it.id, name:it.name, type,
           installation_date:cv[DATE_COL]?.date ?? null,
           sum_eur:num
         });
       }
     }
-
-    const wrap = t=>{
-      const arr = bucket[t], tot = arr.reduce((s,r)=>s+r.sum_eur,0);
-      return { meta:{type:t,total_items:arr.length,total_sum_eur:+tot.toFixed(2)}, items:arr };
+    const pack = t=>{
+      const arr=bucket[t], tot=arr.reduce((s,r)=>s+r.sum_eur,0);
+      return {meta:{type:t,total_items:arr.length,total_sum_eur:+tot.toFixed(2)},items:arr};
     };
-    return { b2c:wrap('B2C'), b2b:wrap('B2B') };
+    return {b2c:pack('B2C'), b2b:pack('B2B')};
   }
 
-  /* –– RUN –– */
-  try{
-    const ids   = await gatherIds();          // 👈 now truly every item
-    const data  = await hydrate(ids);
+  /*──────────────────── RUN */
+  try {
+    const ids  = await gatherIds();
+    console.log(`◎ gathered total ids: ${ids.length}`);
+    const data = await hydrate(ids);
     res.status(200).json(data);
-  }catch(e){
+  } catch (e) {
+    console.error('💥 top-level catch', e);
     res.status(500).json({error:'Monday API error',details:e.message||e});
   }
 }
