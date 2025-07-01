@@ -6,25 +6,22 @@ export default async function handler(req, res) {
 
   const query = `
     query {
-      boards(ids: ${BOARD_ID}) {
+      items (board_ids: [${BOARD_ID}]) {
+        id
         name
-        items {
+        column_values {
           id
-          name
-          column_values {
-            id
-            title
+          title
+          text
+          type
+          ... on StatusValue {
+            label
+          }
+          ... on MirrorValue {
+            display_value
+          }
+          ... on FormulaValue {
             text
-            type
-            ... on StatusValue {
-              label
-            }
-            ... on MirrorValue {
-              display_value
-            }
-            ... on FormulaValue {
-              text
-            }
           }
         }
       }
@@ -47,7 +44,7 @@ export default async function handler(req, res) {
     });
 
     const raw = await response.text();
-    console.log("📨 Raw response:", raw.slice(0, 3000)); // truncate if large
+    console.log("📨 Raw response:", raw.slice(0, 3000));
 
     const data = JSON.parse(raw);
 
@@ -56,7 +53,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: data.errors });
     }
 
-    const items = data.data.boards[0].items;
+    const items = data.data.items;
     console.log(`📦 Found ${items.length} items`);
 
     const filteredItems = items.filter((item) => {
