@@ -1,8 +1,7 @@
 /**
  * /api/monday.js
- * Get every B2C / B2B item whose main status is
- * “Įrengta” (1) or “Atsiskaityta su partneriu” (6).
- * Returns totals + raw rows.
+ * Fetch ALL items inside the two “sales” groups, separate them
+ * into B2C / B2B by the `status6` column, and return totals + rows.
  */
 export default async function handler (req, res) {
   /* ── CORS ─────────────────────────────────── */
@@ -17,22 +16,20 @@ export default async function handler (req, res) {
     return res.status(500).json({ error:'MONDAY_API_KEY missing' });
   }
 
-  /* ── IDs & labels ─────────────────────────── */
-  const BOARD_ID           = 1645436514;
-  const STATUS_ID          = 'status';          // main status
-  const TYPE_ID            = 'status6';         // B2C / B2B
-  const EUR_ID             = 'formula_mkmp4x00';// €
-  const DATE_ID            = 'date8';           // installation date
+  /* ── board / column / group IDs ───────────── */
+  const BOARD_ID      = 1645436514;
+  const TYPE_ID       = 'status6';          // B2C | B2B labels
+  const EUR_ID        = 'formula_mkmp4x00'; // € column
+  const DATE_ID       = 'date8';            // installation date
 
-  const STATUS_LABELS = ['Įrengta', 'Atsiskaityta su partneriu'];
-  const TYPE_LABELS   = { 1:'B2C', 2:'B2B' };
+  const GROUP_IDS     = ['new_group50055','new_group89286']; // ← only these groups
+  const TYPE_LABELS   = { 'B2C':'B2C', 'B2B':'B2B' };        // accepted labels
 
-  /* ── small GraphQL helper ─────────────────── */
+  /* ── GraphQL helper ───────────────────────── */
   const HEADERS = { Authorization:API_KEY, 'Content-Type':'application/json' };
   async function gql (query, variables = {}) {
     const rsp = await fetch('https://api.monday.com/v2', {
-      method:'POST', headers:HEADERS,
-      body:JSON.stringify({query,variables})
+      method:'POST', headers:HEADERS, body:JSON.stringify({query,variables})
     });
     const json = await rsp.json();
     if (json.errors) {
@@ -42,31 +39,30 @@ export default async function handler (req, res) {
     return json.data;
   }
 
-  /* ── 1️⃣  collect every item ID for a client-type ── */
-  async function collectIds (typeLabel) {
-    const ids = [];
+  /* ── 1️⃣ collect ALL item-IDs in each group ─ */
+  async function collectGroupIds (groupId) {
+    const ids   = [];
 
-    /* initial filtered page */
+    /* first page */
     const first = await gql(/* GraphQL */`
-      query ($board:ID!){
-        items_page_by_column_values(
-          board_id:$board, limit:500,
-          columns:[
-            {column_id:"${STATUS_ID}", column_values:${JSON.stringify(STATUS_LABELS)}},
-            {column_id:"${TYPE_ID}",   column_values:["${typeLabel}"]}
-          ]
-        ){
-          cursor items{ id }
+      query ($board:ID!, $gid:String!){
+        boards(ids:$board){
+          groups(ids:[$gid]){
+            items_page(limit:500){
+              cursor
+              items{ id }
+            }
+          }
         }
-      }`, { board:BOARD_ID });
+      }`, { board:BOARD_ID, gid:groupId });
 
-    const start = first.items_page_by_column_values;
-    if (!start) return ids;
+    const entry = first?.boards?.[0]?.groups?.[0]?.items_page;
+    if (!entry) return ids;
 
-    ids.push(...start.items.map(i=>i.id));
-    let cursor = start.cursor;
+    ids.push(...entry.items.map(i=>i.id));
+    let cursor = entry.cursor;
 
-    /* walk through the cursor chain */
+    /* keep paginating with next_items_page */
     while (cursor) {
       const step = await gql(/* GraphQL */`
         query ($cursor:String!){
@@ -77,32 +73,31 @@ export default async function handler (req, res) {
 
       const page = step.next_items_page;
       ids.push(...page.items.map(i=>i.id));
-      cursor = page.cursor;          // becomes null when done
+      cursor = page.cursor;
     }
     return ids;
   }
 
-  /* ── 2️⃣  hydrate: 100-ID batches + number normalisation ── */
+  /* ── 2️⃣ hydrate IDs, categorise & normalise € ─ */
   function euroToFloat(raw){
-    if (!raw || raw === 'No result') return null;
+    if (!raw || raw==='No result') return null;
     return parseFloat(
       raw.replace(/[.\s\u00A0]/g,'').replace(',','.')
     );
   }
 
-  async function hydrate (ids, label) {
-    const rows = [];
+  async function hydrate(ids){
+    const buckets = { B2C:[], B2B:[] };
 
-    for (let i = 0; i < ids.length; i += 100) {
-      const slice = ids.slice(i, i+100);
+    for (let i=0;i<ids.length;i+=100){
+      const slice = ids.slice(i,i+100);
 
-      const d = await gql(/* GraphQL */`
+      const data = await gql(/* GraphQL */`
         query ($ids:[ID!]!){
           items(ids:$ids){
             id name
             column_values(ids:[
               "${EUR_ID}",
-              "${STATUS_ID}",
               "${TYPE_ID}",
               "${DATE_ID}"
             ]){
@@ -112,48 +107,51 @@ export default async function handler (req, res) {
               ... on DateValue    {date}
             }
           }
-        }`, { ids: slice });
+        }`, { ids:slice });
 
-      for (const it of (d.items || [])) {
+      for (const it of (data.items || [])){
         const cv  = Object.fromEntries(it.column_values.map(c=>[c.id,c]));
-        const num = euroToFloat(cv[EUR_ID]?.display_value);
-        if (num == null) continue;
+        const typeLabel = TYPE_LABELS[cv[TYPE_ID]?.label] ?? null;
+        if (!typeLabel) continue;                    // skip unknown types
 
-        rows.push({
-          id   : it.id,
-          name : it.name,
-          status : cv[STATUS_ID]?.label ?? null,
-          type   : label,
+        const num = euroToFloat(cv[EUR_ID]?.display_value);
+        if (num==null) continue;
+
+        buckets[typeLabel].push({
+          id  : it.id,
+          name: it.name,
+          type: typeLabel,
           installation_date : cv[DATE_ID]?.date ?? null,
           sum_eur : num
         });
       }
     }
-
-    const total = rows.reduce((s,r)=>s+r.sum_eur, 0);
-    return {
-      meta : {
-        type : label,
-        total_items   : rows.length,
-        total_sum_eur : +total.toFixed(2)
-      },
-      items : rows
-    };
+    /* build meta */
+    const result = {};
+    for (const key of Object.keys(buckets)){
+      const arr = buckets[key];
+      const total = arr.reduce((s,r)=>s+r.sum_eur,0);
+      result[key.toLowerCase()] = {
+        meta : {
+          type : key,
+          total_items   : arr.length,
+          total_sum_eur : +total.toFixed(2)
+        },
+        items: arr
+      };
+    }
+    return result;
   }
 
-  /* ── RUN ───────────────────────────────────── */
+  /* ── RUN ──────────────────────────────────── */
   try{
-    const [b2cIds, b2bIds] = await Promise.all([
-      collectIds(TYPE_LABELS[1]),   // "B2C"
-      collectIds(TYPE_LABELS[2])    // "B2B"
-    ]);
+    /* gather IDs from both groups */
+    const groupIdsArrays = await Promise.all(GROUP_IDS.map(collectGroupIds));
+    const allIds         = [...new Set(groupIdsArrays.flat())];   // dedup
 
-    const [b2c, b2b] = await Promise.all([
-      hydrate(b2cIds,'B2C'),
-      hydrate(b2bIds,'B2B')
-    ]);
+    const dataByType = await hydrate(allIds);
 
-    res.status(200).json({ b2c, b2b });
+    res.status(200).json(dataByType);
   }catch(err){
     res.status(500).json({ error:'Monday API error', details:err.message||err });
   }
