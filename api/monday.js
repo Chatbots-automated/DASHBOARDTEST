@@ -6,62 +6,77 @@ export default async function handler(req, res) {
 
   console.log("✅ Handler invoked");
 
- const statusFilterQuery = `
-  query {
-    boards(ids: ${BOARD_ID}) {
-      items_page(
-        limit: 500,
-        query_params: {
-          rules: [
-            {
-              column_id: "${STATUS_COLUMN_ID}",
-              compare_value: [1],
-              operator: any_of
+  // STEP 1: Paginate all matching items
+  let allItems = [];
+  let cursor = null;
+  let page = 1;
+
+  console.log("📡 STEP 1: Fetching ALL items with status = Įrengta (index 1)");
+
+  while (true) {
+    const query = `
+      query {
+        boards(ids: ${BOARD_ID}) {
+          items_page(
+            limit: 500,
+            cursor: ${cursor ? `"${cursor}"` : null},
+            query_params: {
+              rules: [
+                {
+                  column_id: "${STATUS_COLUMN_ID}",
+                  compare_value: [1],
+                  operator: any_of
+                }
+              ]
             }
-          ]
-        }
-      ) {
-        cursor
-        items {
-          id
-          name
+          ) {
+            cursor
+            items {
+              id
+              name
+            }
+          }
         }
       }
-    }
-  }
-`;
+    `;
 
-
-
-  console.log("📡 STEP 1: Fetching item IDs with status = Įrengta");
-  console.log("📝 STEP 1 QUERY:\n", statusFilterQuery);
-
-  try {
-    const filterRes = await fetch("https://api.monday.com/v2", {
+    console.log(`📄 STEP 1.${page}: Sending paginated request... cursor = ${cursor}`);
+    const resPage = await fetch("https://api.monday.com/v2", {
       method: "POST",
       headers: {
         Authorization: API_KEY,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query: statusFilterQuery }),
+      body: JSON.stringify({ query }),
     });
 
-    const filterRaw = await filterRes.text();
-    console.log("📨 STEP 1 Raw Response:", filterRaw.slice(0, 1000));
-    const filtered = JSON.parse(filterRaw);
-    const items = filtered?.data?.boards?.[0]?.items_page?.items;
+    const text = await resPage.text();
+    console.log(`📨 STEP 1.${page} response:`, text.slice(0, 1000));
+    const json = JSON.parse(text);
+    const data = json?.data?.boards?.[0]?.items_page;
 
-    if (!items || !items.length) {
-      console.warn("⚠️ STEP 1: No items matched Įrengta");
-      return res.status(200).json({ items: [] });
-    }
+    if (!data?.items?.length) break;
 
-    const itemIds = items.map((i) => i.id);
-    console.log(`🔢 STEP 1: Found ${itemIds.length} item(s):`, itemIds);
+    allItems.push(...data.items);
+    if (!data.cursor) break;
 
-    const formulaQuery = `
+    cursor = data.cursor;
+    page++;
+  }
+
+  console.log(`✅ STEP 1 done: Total matching items = ${allItems.length}`);
+  if (!allItems.length) return res.status(200).json({ items: [] });
+
+  // STEP 2: Fetch formula values in batches
+  const itemIds = allItems.map((i) => i.id);
+  const BATCH_SIZE = 100;
+  const results = [];
+
+  for (let i = 0; i < itemIds.length; i += BATCH_SIZE) {
+    const batchIds = itemIds.slice(i, i + BATCH_SIZE);
+    const query = `
       query {
-        items(ids: [${itemIds.join(",")}]) {
+        items(ids: [${batchIds.join(",")}]) {
           id
           name
           column_values(ids: ["${FORMULA_COLUMN_ID}", "${STATUS_COLUMN_ID}"]) {
@@ -78,42 +93,35 @@ export default async function handler(req, res) {
       }
     `;
 
-    console.log("📡 STEP 2: Fetching formula values...");
-    console.log("📝 STEP 2 QUERY:\n", formulaQuery);
-
+    console.log(`📡 STEP 2.${i / BATCH_SIZE + 1}: Fetching formula values for ${batchIds.length} items`);
     const formulaRes = await fetch("https://api.monday.com/v2", {
       method: "POST",
       headers: {
         Authorization: API_KEY,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query: formulaQuery }),
+      body: JSON.stringify({ query }),
     });
 
-    const formulaRaw = await formulaRes.text();
-    console.log("📨 STEP 2 Raw Response:", formulaRaw.slice(0, 1000));
-    const formulaData = JSON.parse(formulaRaw);
+    const raw = await formulaRes.text();
+    console.log("📨 STEP 2 raw:", raw.slice(0, 1000));
+    const data = JSON.parse(raw);
 
-    const results = formulaData.data.items.map((item) => {
-      const formulaCol = item.column_values.find((col) => col.id === FORMULA_COLUMN_ID);
-      const statusCol = item.column_values.find((col) => col.id === STATUS_COLUMN_ID);
-
+    const batchResults = data?.data?.items?.map((item) => {
+      const formula = item.column_values.find((col) => col.id === FORMULA_COLUMN_ID);
+      const status = item.column_values.find((col) => col.id === STATUS_COLUMN_ID);
       return {
         id: item.id,
         name: item.name,
-        status: statusCol?.label || null,
-        total_sum: formulaCol?.display_value ?? null,
+        status: status?.label || null,
+        total_sum: formula?.display_value ?? null,
       };
-    });
+    }) || [];
 
-    console.log(`✅ STEP 2: Returning ${results.length} result(s)`);
-    return res.status(200).json({ items: results });
-
-  } catch (err) {
-    console.error("💥 UNHANDLED ERROR:", err);
-    return res.status(500).json({
-      error: "Unhandled exception occurred",
-      details: err.message || err,
-    });
+    results.push(...batchResults);
   }
+
+  console.log(`✅ STEP 2 complete: Returning ${results.length} items`);
+  return res.status(200).json({ items: results });
+
 }
