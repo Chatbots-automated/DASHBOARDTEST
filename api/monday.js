@@ -15,7 +15,7 @@ export default async function handler(req, res) {
             rules: [
               {
                 column_id: "${STATUS_COLUMN_ID}",
-                compare_value: ["Įrengta", "Atsiskaityta su partneriu"],
+                compare_value: ["Įrengta"],
                 operator: any_of
               }
             ]
@@ -31,7 +31,7 @@ export default async function handler(req, res) {
     }
   `;
 
-  console.log("📡 STEP 1: Fetching item IDs by status...");
+  console.log("📡 STEP 1: Fetching item IDs with status = Įrengta");
   console.log("📝 STEP 1 QUERY:\n", statusFilterQuery);
 
   try {
@@ -47,16 +47,10 @@ export default async function handler(req, res) {
     const filterRaw = await filterRes.text();
     console.log("📨 STEP 1 Raw Response:", filterRaw.slice(0, 1000));
     const filtered = JSON.parse(filterRaw);
+    const items = filtered?.data?.boards?.[0]?.items_page?.items;
 
-    if (!filtered?.data?.boards?.[0]?.items_page?.items) {
-      console.warn("⚠️ STEP 1: Unexpected response format", filtered);
-      return res.status(500).json({ error: "Unexpected format from Monday.com API" });
-    }
-
-    const items = filtered.data.boards[0].items_page.items;
-
-    if (!items.length) {
-      console.log("⚠️ STEP 1: No items matched the status filter");
+    if (!items || !items.length) {
+      console.warn("⚠️ STEP 1: No items matched Įrengta");
       return res.status(200).json({ items: [] });
     }
 
@@ -97,11 +91,6 @@ export default async function handler(req, res) {
     const formulaRaw = await formulaRes.text();
     console.log("📨 STEP 2 Raw Response:", formulaRaw.slice(0, 1000));
     const formulaData = JSON.parse(formulaRaw);
-
-    if (!formulaData?.data?.items) {
-      console.warn("⚠️ STEP 2: Unexpected response structure:", formulaData);
-      return res.status(500).json({ error: "Unexpected formula query result" });
-    }
 
     const results = formulaData.data.items.map((item) => {
       const formulaCol = item.column_values.find((col) => col.id === FORMULA_COLUMN_ID);
