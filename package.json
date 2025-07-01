@@ -1,0 +1,13 @@
+{
+  "name": "vercel-monday-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "api/monday.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "node api/monday.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.4.1"
+  }
+}
