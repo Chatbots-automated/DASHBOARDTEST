@@ -19,8 +19,7 @@ export default async function handler(req, res) {
         boards(ids: ${BOARD_ID}) {
           items_page(
             limit: 500,
-            cursor: ${cursor ? `"${cursor}"` : null},
-            query_params: {
+            ${cursor ? `cursor: "${cursor}"` : `query_params: {
               rules: [
                 {
                   column_id: "${STATUS_COLUMN_ID}",
@@ -28,7 +27,7 @@ export default async function handler(req, res) {
                   operator: any_of
                 }
               ]
-            }
+            }`}
           ) {
             cursor
             items {
@@ -122,6 +121,24 @@ export default async function handler(req, res) {
   }
 
   console.log(`✅ STEP 2 complete: Returning ${results.length} items`);
-  return res.status(200).json({ items: results });
 
+  // STEP 3: Total sum calculation
+  const numericOnly = results
+    .map((item) => {
+      const raw = item.total_sum;
+      if (!raw || raw === "No result") return null;
+      const normalized = raw.replace(/\./g, "").replace(",", ".");
+      const parsed = parseFloat(normalized);
+      return isNaN(parsed) ? null : parsed;
+    })
+    .filter((v) => v !== null);
+
+  const totalSum = numericOnly.reduce((sum, val) => sum + val, 0);
+  console.log(`💰 Total sum: ${totalSum.toFixed(2)} EUR`);
+
+  return res.status(200).json({
+    total_sum: totalSum.toFixed(2),
+    item_count: results.length,
+    items: results,
+  });
 }
