@@ -6,14 +6,14 @@ export default async function handler(req, res) {
 
   const API_KEY = process.env.MONDAY_API_KEY;
   const BOARD_ID = 1645436514;
-  const STATUS_COLUMN_ID = "status";     // Įrengta = 1, Atsiskaityta = 6
+  const STATUS_COLUMN_ID = "status";     // Įerengta = 1, Atsiskaityta = 6
   const TYPE_COLUMN_ID = "status6";      // B2C = 1, B2B = 2
   const FORMULA_COLUMN_ID = "formula_mkmp4x00";
+  const DATE_COLUMN_ID = "date8";        // Installation time
 
   async function fetchItems(typeIndex) {
     let allItems = [];
     let cursor = null;
-    let page = 1;
 
     while (true) {
       const query = `
@@ -54,7 +54,6 @@ export default async function handler(req, res) {
       if (!data.cursor) break;
 
       cursor = data.cursor;
-      page++;
     }
 
     return allItems.map((item) => item.id);
@@ -71,11 +70,12 @@ export default async function handler(req, res) {
           items(ids: [${batch.join(",")}]) {
             id
             name
-            column_values(ids: ["${FORMULA_COLUMN_ID}", "${STATUS_COLUMN_ID}", "${TYPE_COLUMN_ID}"]) {
+            column_values(ids: ["${FORMULA_COLUMN_ID}", "${STATUS_COLUMN_ID}", "${TYPE_COLUMN_ID}", "${DATE_COLUMN_ID}"]) {
               id
               type
               ... on FormulaValue { display_value }
               ... on StatusValue { label }
+              ... on DateValue { date }
             }
           }
         }
@@ -96,11 +96,13 @@ export default async function handler(req, res) {
       const batchResults = data?.data?.items?.map((item) => {
         const formula = item.column_values.find((col) => col.id === FORMULA_COLUMN_ID);
         const status = item.column_values.find((col) => col.id === STATUS_COLUMN_ID);
+        const date = item.column_values.find((col) => col.id === DATE_COLUMN_ID);
         return {
           id: item.id,
           name: item.name,
           status: status?.label || null,
           type: typeLabel,
+          installation_date: date?.date || null,
           total_sum: formula?.display_value ?? null,
         };
       }) || [];
@@ -123,6 +125,7 @@ export default async function handler(req, res) {
           name: item.name,
           status: item.status,
           type: item.type,
+          installation_date: item.installation_date,
           sum_eur: parsed,
         };
       })
