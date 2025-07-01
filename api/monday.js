@@ -6,7 +6,7 @@ export default async function handler(req, res) {
 
   const API_KEY = process.env.MONDAY_API_KEY;
   const BOARD_ID = 1645436514;
-  const STATUS_COLUMN_ID = "status";     // Įrengta = index 1
+  const STATUS_COLUMN_ID = "status";     // Įrengta = 1, Atsiskaityta = 6
   const TYPE_COLUMN_ID = "status6";      // B2C = 1, B2B = 2
   const FORMULA_COLUMN_ID = "formula_mkmp4x00";
 
@@ -23,7 +23,7 @@ export default async function handler(req, res) {
               limit: 500,
               ${cursor ? `cursor: "${cursor}"` : `query_params: {
                 rules: [
-                  { column_id: "${STATUS_COLUMN_ID}", compare_value: [1], operator: any_of },
+                  { column_id: "${STATUS_COLUMN_ID}", compare_value: [1, 6], operator: any_of },
                   { column_id: "${TYPE_COLUMN_ID}", compare_value: [${typeIndex}], operator: any_of }
                 ]
               }`}
@@ -140,7 +140,6 @@ export default async function handler(req, res) {
     };
   }
 
-  // Fetch both B2C and B2B
   const b2cIds = await fetchItems(1);
   const b2c = await fetchItemDetails(b2cIds, "B2C");
 
