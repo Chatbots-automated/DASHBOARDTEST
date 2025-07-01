@@ -141,3 +141,29 @@ export default async function handler(req, res) {
       const dotCount = (raw.match(/\./g) || []).length;
       const normalized =
         dotCount >= 2
+          ? raw.replace(/\./g, "").replace(",", ".")
+          : raw.replace(",", ".");
+
+      const parsed = parseFloat(normalized);
+      if (isNaN(parsed)) return null;
+
+      return {
+        id: item.id,
+        name: item.name,
+        status: item.status,
+        sum_eur: parsed,
+      };
+    })
+    .filter((i) => i !== null);
+
+  const totalSum = cleanItems.reduce((acc, item) => acc + item.sum_eur, 0);
+  console.log(`💰 Total sum: ${totalSum.toFixed(2)} EUR`);
+
+  return res.status(200).json({
+    meta: {
+      total_items: cleanItems.length,
+      total_sum_eur: parseFloat(totalSum.toFixed(2)),
+    },
+    items: cleanItems,
+  });
+}
