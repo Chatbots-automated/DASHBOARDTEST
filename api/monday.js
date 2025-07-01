@@ -15,7 +15,7 @@ export default async function handler(req, res) {
           rules: [
             {
               column_id: "${STATUS_COLUMN_ID}",
-              compare_value: [1],   // ✅ this is now correct
+              compare_value: [1],
               operator: any_of
             }
           ]
@@ -30,6 +30,7 @@ export default async function handler(req, res) {
     }
   }
 `;
+
 
 
   console.log("📡 STEP 1: Fetching item IDs with status = Įrengta");
