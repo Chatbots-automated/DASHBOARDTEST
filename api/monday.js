@@ -1,149 +1,188 @@
 /**
- * /api/monday.js    –– DEBUG: list groups first
+ * /api/monday.js
+ * Pull every item that lives in groups new_group50055 / new_group89286,
+ * bucket them by status6 →  B2C • B2B • Other, and spit out totals + rows.
+ * — now with VERBOSE LOGGING so we can see where things blow up 🙂
  */
 export default async function handler (req, res) {
-  /*  CORS  */
+  /* –– CORS –– */
   res.setHeader('Access-Control-Allow-Origin','*');
   res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  /*  ENV  */
+  /* –– ENV –– */
   const API_KEY = process.env.MONDAY_API_KEY;
   if (!API_KEY) return res.status(500).json({error:'MONDAY_API_KEY missing'});
 
-  /*  CONFIG  */
-  const BOARD_ID  = 1645436514;                  //  ← double-check
-  const WANTED    = new Set(['new_group50055','new_group89286']);
+  /* –– IDs & constants –– */
+  const BOARD_ID   = 1645436514;
+  const GROUP_IDS  = ['new_group50055','new_group89286'];      // scope
+  const TYPE_COL   = 'status6';           // B2C / B2B
+  const NUMBER_COL = 'numbers';           // Deal value (plain number)
+  const DATE_COL   = 'date8';             // Actual Installation
+  const VALID      = new Set(['B2C','B2B']);
 
-  const TYPE_COL  = 'status6';                   // B2C / B2B
-  const NUM_COL   = 'numbers';                   // deal € w/o VAT
-  const DATE_COL  = 'date8';
-  const VALID     = new Set(['B2C','B2B']);
-
-  /*  tiny GraphQL helper with back-off  */
+  /* –– helpers –– */
   const HEADERS = {Authorization:API_KEY,'Content-Type':'application/json'};
-  const gql = async (query, variables=undefined) => {
+
+  /** Small helper to pretty-print *part* of a JSON for the logs */
+  const peek = (obj, n = 2) =>
+    JSON.stringify(
+      Array.isArray(obj) ? obj.slice(0, n) : obj,
+      null, 2
+    ).substring(0, 800);                // don’t flood the logs
+
+  async function gql(label, query, variables = undefined) {
     const body = variables ? { query, variables } : { query };
+    /* make the request (w/ simple 429 back-off just in case) */
     while (true) {
-      const r = await fetch('https://api.monday.com/v2',
-                 {method:'POST',headers:HEADERS,body:JSON.stringify(body)});
-      if (r.status === 429) {
-        const wait=(+r.headers.get('Retry-After')||1)*1000;
-        console.warn(` ↺ 429 – wait ${wait/1000}s`); await new Promise(t=>setTimeout(t,wait));
+      const r = await fetch('https://api.monday.com/v2', {
+        method: 'POST', headers: HEADERS, body: JSON.stringify(body)
+      });
+
+      if (r.status === 429) {                 // minute-rate → wait + retry
+        const wait = (+r.headers.get('Retry-After') || 1) * 1000;
+        console.warn(`⏳  ${label} hit 429 – retrying in ${wait} ms`);
+        await new Promise(t => setTimeout(t, wait));
         continue;
       }
+
       const j = await r.json();
-      if (j.errors) throw new Error(JSON.stringify(j.errors,null,2));
+      if (j.errors) {
+        console.error(`💥  ${label} returned errors:\n`,
+                      JSON.stringify(j.errors, null, 2));
+        throw new Error('Monday API error');
+      }
+
+      console.log(`📨  ${label} OK – payload preview:\n${peek(j.data)}`);
       return j.data;
     }
-  };
-
-  const parseNum = raw =>
-    !raw || raw === 'No result'
-      ? 0
-      : parseFloat(raw.replace(/[.\s\u00A0]/g,'').replace(',','.'));
-
-  /*  STEP 0 – list groups, keep the ones we need  */
-  async function discoverGroups () {
-    const data = await gql(`
-      query {
-        boards(ids:[${BOARD_ID}]){
-          groups { id title }
-        }
-      }`);
-    const groups = data?.boards?.[0]?.groups ?? [];
-    console.log('\n📋  Groups on board', BOARD_ID);
-    groups.forEach(g=>console.log(`   • ${g.id.padEnd(15)}  ${g.title}`));
-
-    const usable = groups.filter(g=>WANTED.has(g.id));
-    if (!usable.length) {
-      console.warn('\n⚠️  None of the requested group IDs exist on this board.');
-    } else {
-      console.log('\n✅  Will fetch items from:',
-                  usable.map(g=>`${g.id} (${g.title})`).join(', '));
-    }
-    return usable.map(g=>g.id);
   }
 
-  /*  collect all IDs from ONE group  */
-  async function idsFromGroup (gid) {
-    const ids=[];
-    let page = await gql(`
+  /* –– 1️⃣  collect EVERY id in the two groups –– */
+  async function collectIds () {
+    const ids = [];
+
+    /* ---------- first page (board-level filter by group) ---------- */
+    const groupRule = GROUP_IDS.map(g => `"${g}"`).join(',');
+    let page = (await gql(
+      'first items_page',
+      `
       query {
-        boards(ids:[${BOARD_ID}]){
-          groups(ids:["${gid}"]){
-            items_page(limit:500){ cursor items{ id } }
+        boards(ids:${BOARD_ID}) {
+          items_page(
+            limit: 500
+            query_params: {
+              rules: [
+                { column_id:"group",
+                  compare_value:[${groupRule}],
+                  operator: any_of }
+              ]
+            }
+          ) {
+            cursor
+            items { id }
           }
         }
-      }`).boards?.[0]?.groups?.[0]?.items_page;
+      }`
+    )).boards?.[0]?.items_page;
 
-    if (!page) return ids;
-    ids.push(...page.items.map(i=>i.id));
-    while (page.cursor) {
-      page = await gql(`
-        query{
-          next_items_page(limit:500,cursor:"${page.cursor}"){
-            cursor items{ id }
+    console.log(`🔍  first page items: ${page?.items?.length || 0}`);
+    ids.push(...(page?.items || []).map(i => i.id));
+
+    /* ---------- follow the cursor chain ---------- */
+    while (page?.cursor) {
+      page = (await gql(
+        `next_items_page (${ids.length} accumulated so far)`,
+        `
+        query ($c: String!) {
+          next_items_page(limit: 500, cursor:$c) {
+            cursor
+            items { id }
           }
-        }`).next_items_page;
+        }`,
+        { c: page.cursor }
+      )).next_items_page;
+
+      console.log(`🔍  next page items: ${page?.items?.length || 0}`);
       if (!page?.items?.length) break;
-      ids.push(...page.items.map(i=>i.id));
+      ids.push(...page.items.map(i => i.id));
     }
+
+    console.log(`🧮  TOTAL unique IDs collected: ${ids.length}`);
     return ids;
   }
 
-  /*  hydrate → bucket  */
+  /* –– 2️⃣  hydrate & bucket –– */
+  const parseNumber = raw =>
+    raw == null || raw === '' ? 0 : Number(raw);
+
   async function hydrate (allIds) {
-    const bucket={B2C:[],B2B:[],Other:[]};
-    for (let i=0;i<allIds.length;i+=100){
-      const slice = allIds.slice(i,i+100);
-      const d = await gql(`
-        query($ids:[ID!]!){
+    const bucket = { B2C: [], B2B: [], Other: [] };
+
+    for (let i = 0; i < allIds.length; i += 100) {
+      const slice = allIds.slice(i, i + 100);
+
+      const resp = await gql(
+        `items slice ${i}–${i + slice.length}`,
+        `
+        query ($ids:[ID!]!) {
           items(ids:$ids){
             id name
-            column_values(ids:["${NUM_COL}","${TYPE_COL}","${DATE_COL}"]){
+            column_values(ids:["${NUMBER_COL}","${TYPE_COL}","${DATE_COL}"]){
               id
               ... on NumbersValue { number }
               ... on StatusValue  { label }
               ... on DateValue    { date }
+              text               # fallback when nothing else
             }
           }
-        }`,{ids:slice});
+        }`,
+        { ids: slice }
+      );
 
-      for (const it of d.items){
-        const cv   = Object.fromEntries(it.column_values.map(c=>[c.id,c]));
-        const type = VALID.has(cv[TYPE_COL]?.label) ? cv[TYPE_COL].label : 'Other';
-        const num  = cv[NUM_COL]?.number ?? 0;
+      for (const it of resp.items || []) {
+        const cv   = Object.fromEntries(it.column_values.map(c => [c.id, c]));
+        const rawT = cv[TYPE_COL]?.label;
+        const type = VALID.has(rawT) ? rawT : 'Other';
+
+        /* prefer the typed “number” field; fall back to text */
+        const rawN = cv[NUMBER_COL]?.number ??
+                     parseNumber(cv[NUMBER_COL]?.text) ?? 0;
+
         bucket[type].push({
-          id:it.id,name:it.name,type,
-          installation_date:cv[DATE_COL]?.date??null,
-          sum_eur:num
+          id  : it.id,
+          name: it.name,
+          type,
+          installation_date: cv[DATE_COL]?.date ?? null,
+          sum_eur: rawN
         });
       }
+
+      console.log(`✅  processed slice ${i}–${i + slice.length}`);
     }
-    const pack=t=>{
-      const a=bucket[t], tot=a.reduce((s,r)=>s+r.sum_eur,0);
-      return {meta:{type:t,total_items:a.length,total_sum_eur:+tot.toFixed(2)},items:a};
+
+    /* build response */
+    const pack = t => {
+      const arr = bucket[t];
+      const tot = arr.reduce((s, r) => s + r.sum_eur, 0);
+      return {
+        meta: { type: t, total_items: arr.length, total_sum_eur: +tot.toFixed(2) },
+        items: arr
+      };
     };
-    return {b2c:pack('B2C'), b2b:pack('B2B'), other:pack('Other')};
+
+    return { b2c: pack('B2C'), b2b: pack('B2B'), other: pack('Other') };
   }
 
-  /*  RUN  */
+  /* –– RUN –– */
   try {
-    const targetGroups = await discoverGroups();
-    if (!targetGroups.length) {
-      return res.status(200).json({error:'No matching groups on board'});
-    }
-
-    const idSets = await Promise.all(targetGroups.map(idsFromGroup));
-    const unique = [...new Set(idSets.flat())];
-    console.log(`\n🧮  Total unique item IDs: ${unique.length}\n`);
-
-    const data = await hydrate(unique);
+    const ids  = await collectIds();   // <- logs will show exactly what we got
+    const data = await hydrate(ids);
     res.status(200).json(data);
-  } catch (err) {
-    console.error('💥', err);
-    res.status(500).json({error:'Monday API error',details:err.message||err});
+  } catch (e) {
+    console.error('🚨  FINAL ERROR:', e);
+    res.status(500).json({ error:'Monday API error', details:e.message || e });
   }
 }
