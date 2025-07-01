@@ -1,24 +1,3 @@
-boards(ids: [1645436514]) {
-  items {
-    ...
-  }
-}
-``>
-
----
-
-### ❌ Error 2: `Cannot query field "title" on type "ColumnValue"`
-**Fix**: `title` is not a valid field on `ColumnValue`. You can use:
-- `id`
-- `text`
-- `type`
-- and fragments like `... on StatusValue { label }`
-
----
-
-### ✅ ✅ Final working version
-
-```js
 export default async function handler(req, res) {
   const API_KEY = process.env.MONDAY_API_KEY;
   const BOARD_ID = 1645436514;
@@ -85,7 +64,10 @@ export default async function handler(req, res) {
     console.log(`✅ Filtered ${filteredItems.length} items matching status`);
 
     const result = filteredItems.map((item) => {
-      const statusCol = item.column_values.find(col => col.type === "color");
+      const statusCol = item.column_values.find(
+        (col) => col.type === "color" && ALLOWED_STATUSES.includes(col.label)
+      );
+
       const totalSumCol = item.column_values.find(
         (col) => col.id === TOTAL_SUM_COLUMN_ID
       );
@@ -93,7 +75,7 @@ export default async function handler(req, res) {
       return {
         id: item.id,
         name: item.name,
-        status: statusCol?.label || statusCol?.text || null,
+        status: statusCol?.label || null,
         total_sum: totalSumCol?.text ?? null,
       };
     });
