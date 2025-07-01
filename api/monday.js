@@ -1,23 +1,39 @@
 export default async function handler(req, res) {
   const API_KEY = process.env.MONDAY_API_KEY;
   const BOARD_ID = 1645436514;
-  const ALLOWED_STATUSES = ["Įrengta", "Atsiskaityta su partneriais."];
+  const STATUS_COLUMN_ID = "status"; // change this if your column ID is different
   const TOTAL_SUM_COLUMN_ID = "lookup_mks65gxc";
 
   const query = `
     query {
-      items_by_board (board_id: ${BOARD_ID}, limit: 500) {
-        id
-        name
-        column_values {
-          id
-          text
-          type
-          ... on StatusValue {
-            label
+      boards(ids: ${BOARD_ID}) {
+        items_page(
+          limit: 500,
+          query_params: {
+            rules: [
+              {
+                column_id: "${STATUS_COLUMN_ID}",
+                compare_value: ["Įrengta", "Atsiskaityta su partneriais."],
+                operator: any_of
+              }
+            ]
           }
-          ... on FormulaValue {
-            text
+        ) {
+          cursor
+          items {
+            id
+            name
+            column_values {
+              id
+              text
+              type
+              ... on StatusValue {
+                label
+              }
+              ... on FormulaValue {
+                text
+              }
+            }
           }
         }
       }
@@ -26,7 +42,6 @@ export default async function handler(req, res) {
 
   console.log("📡 Sending Monday.com GraphQL query...");
   console.log("🔑 API_KEY:", API_KEY ? "✅ Loaded" : "❌ Missing");
-  console.log("📋 BOARD_ID:", BOARD_ID);
   console.log("📤 QUERY:", query);
 
   try {
@@ -41,7 +56,6 @@ export default async function handler(req, res) {
 
     const raw = await response.text();
     console.log("📨 Raw response:", raw.slice(0, 3000));
-
     const data = JSON.parse(raw);
 
     if (data.errors) {
@@ -49,26 +63,12 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: data.errors });
     }
 
-    const items = data.data.items_by_board;
-    console.log(`📦 Found ${items.length} items`);
+    const items = data.data.boards[0].items_page.items;
+    console.log(`📦 Found ${items.length} filtered items`);
 
-    const filteredItems = items.filter((item) => {
-      const statusCol = item.column_values.find(
-        (col) => col.type === "color" && ALLOWED_STATUSES.includes(col.label)
-      );
-      return Boolean(statusCol);
-    });
-
-    console.log(`✅ Filtered ${filteredItems.length} items matching status`);
-
-    const result = filteredItems.map((item) => {
-      const statusCol = item.column_values.find(
-        (col) => col.type === "color" && ALLOWED_STATUSES.includes(col.label)
-      );
-
-      const totalSumCol = item.column_values.find(
-        (col) => col.id === TOTAL_SUM_COLUMN_ID
-      );
+    const result = items.map((item) => {
+      const statusCol = item.column_values.find((col) => col.type === "color");
+      const totalSumCol = item.column_values.find((col) => col.id === TOTAL_SUM_COLUMN_ID);
 
       return {
         id: item.id,
