@@ -1,151 +1,140 @@
-/**
- * /api/monday.js
- * Grabs ALL items (no limit) in both B2C and B2B,
- * filters for statuses 1 & 6, and returns per-type totals + raw rows.
- */
-export default async function handler(req, res) {
-  /* ---------- CORS ---------- */
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+export default async function handler (req, res) {
+  /* CORS -------------------------------------------------------- */
+  res.setHeader('Access-Control-Allow-Origin',  '*');
+  res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  /* ---------- env ---------- */
+  /* CONFIG ------------------------------------------------------ */
   const API_KEY = process.env.MONDAY_API_KEY;
-  if (!API_KEY) return res.status(500).json({ error: 'MONDAY_API_KEY missing' });
+  if (!API_KEY) return res.status(500).json({error:'MONDAY_API_KEY missing'});
 
-  /* ---------- board/column IDs ---------- */
   const BOARD_ID           = 1645436514;
-  const STATUS_COLUMN_ID   = 'status';          // Įrengta = 1, Atsiskaityta = 6
-  const TYPE_COLUMN_ID     = 'status6';         // B2C = 1, B2B = 2
-  const FORMULA_COLUMN_ID  = 'formula_mkmp4x00';// €
-  const DATE_COLUMN_ID     = 'date8';           // installation date
+  const STATUS_COLUMN_ID   = 'status';          // 1 (Įrengta), 6 (Atsiskaityta)
+  const TYPE_COL_ID        = 'status6';         // 1 = B2C, 2 = B2B
+  const FORMULA_COL_ID     = 'formula_mkmp4x00';// €
+  const DATE_COL_ID        = 'date8';           // install date
 
-  /* ---------- GraphQL helper ---------- */
-  const HEADERS = { Authorization: API_KEY, 'Content-Type': 'application/json' };
-  async function gql(query) {
-    const rsp  = await fetch('https://api.monday.com/v2', {
-      method: 'POST', headers: HEADERS, body: JSON.stringify({ query })
+  const HEADERS = {Authorization:API_KEY,'Content-Type':'application/json'};
+
+  /* tiny helper ------------------------------------------------- */
+  async function gql (query, variables = {}) {
+    const r  = await fetch('https://api.monday.com/v2',{
+      method:'POST', headers:HEADERS,
+      body  : JSON.stringify({query, variables})
     });
-    const txt  = await rsp.text();
-    const json = JSON.parse(txt);
-    if (json.errors) {
-      console.error('⛔️ monday API error\nQuery:\n', query,
-                    '\nErrors:\n', JSON.stringify(json.errors, null, 2));
-      throw new Error('monday API returned errors');
+    const t  = await r.text();
+    const j  = JSON.parse(t);
+    if (j.errors) {
+      console.error('\n⛔️ GraphQL error\n',JSON.stringify(j.errors,null,2));
+      throw new Error('monday GraphQL failed');
     }
-    return json.data;
+    return j.data;
   }
 
-  /* ---------- 1️⃣  get *all* item-IDs for one client-type ---------- */
-  async function collectIds(typeIdx) {
-    const ids = [];
+  /* 1️⃣  Collect ALL IDs for a type via items_page_by_column_values ---- */
+  async function collectIds (typeIdx){
+    let ids    = [];
+    let cursor = null;
 
-    /* first (filtered) page */
-    const first = await gql(`
-      query{
-        boards(ids:${BOARD_ID}){
-          items_page(limit:500,
-            query_params:{rules:[
-              {column_id:"${STATUS_COLUMN_ID}",compare_value:[1,6],operator:any_of},
-              {column_id:"${TYPE_COLUMN_ID}",compare_value:[${typeIdx}],operator:any_of}
-            ]}
+    do {
+      const PAGE = await gql(/* GraphQL */`
+        query GetPage($board:ID!,$cursor:String){
+          items_page_by_column_values(
+            board_id:$board, limit:500, cursor:$cursor,
+            columns:[
+              {column_id:"${STATUS_COLUMN_ID}", column_values:["1","6"]},
+              {column_id:"${TYPE_COL_ID}",   column_values:["${typeIdx}"]}
+            ]
           ){
-            cursor items{ id }
+            cursor
+            items{ id }
           }
         }
-      }`);
-    const start = first?.boards?.[0]?.items_page;
-    if (!start) return ids;
-    ids.push(...start.items.map(i => i.id));
+      `,{board:BOARD_ID, cursor});
 
-    /* follow the cursor chain */
-    let cursor = start.cursor;
-    while (cursor) {
-      const next = await gql(`
-        query{
-          next_items_page(limit:500, cursor:"${cursor}"){
-            cursor items{ id }
-          }
-        }`);
-      const page = next?.next_items_page;
-      if (!page) break;
-      ids.push(...page.items.map(i => i.id));
-      cursor = page.cursor;                 // becomes null at the end
-    }
+      const page  = PAGE.items_page_by_column_values;
+      ids.push(...page.items.map(i=>i.id));
+      cursor = page.cursor;
+      console.log(`→ type ${typeIdx}: accumulated ${ids.length} IDs`);
+    } while (cursor);
+
     return ids;
   }
 
-  /* ---------- 2️⃣  hydrate details & fix number format ---------- */
-  function toFloat(raw) {
-    if (!raw || raw === 'No result') return null;
-    // EU style?  (comma exists)
-    if (raw.includes(',')) {
-      return parseFloat(
-        raw.replace(/[.\s\u00A0]/g, '')    // kill thousands sep (“.” / spaces / NBSP)
-           .replace(',', '.')              // decimal comma -> dot
-      );
-    }
-    // US style already
-    return parseFloat(raw.replace(/[ \u00A0]/g, ''));
+  /* 2️⃣  Hydrate details (100-item batches, 4× parallel) -------------- */
+  function euStrToFloat(raw){
+    if(!raw || raw==='No result') return null;
+    // kill thousand separators then swap comma
+    return parseFloat(
+      raw.replace(/[.\s\u00A0]/g,'').replace(',','.')
+    );
   }
 
-  async function hydrate(ids, label) {
-    const rows = [];
-    for (let i = 0; i < ids.length; i += 100) {
-      const slice = ids.slice(i, i + 100).join(',');
-      const data  = await gql(`
-        query{
-          items(ids:[${slice}]){
-            id name
-            column_values(ids:[
-              "${FORMULA_COLUMN_ID}",
-              "${STATUS_COLUMN_ID}",
-              "${TYPE_COLUMN_ID}",
-              "${DATE_COLUMN_ID}"
-            ]){
-              id
-              ... on FormulaValue {display_value}
-              ... on StatusValue  {label}
-              ... on DateValue    {date}
+  async function hydrate(ids, label){
+    const limitConcurrency = (max, fns) => {
+      const pool = new Array(max).fill(Promise.resolve());
+      return Promise.all(fns.map((fn,i)=>
+        (pool[i%max]=pool[i%max].then(fn))
+      ));
+    };
+
+    const jobs = [];
+    for(let i=0;i<ids.length;i+=100){
+      const slice = ids.slice(i,i+100);
+      jobs.push(async ()=>{
+        const DATA = await gql(/* GraphQL */`
+          query Hydrate($ids:[Int]){
+            items(ids:$ids){
+              id name
+              column_values(ids:[
+                "${FORMULA_COL_ID}",
+                "${STATUS_COLUMN_ID}",
+                "${TYPE_COL_ID}",
+                "${DATE_COL_ID}"
+              ]){
+                id
+                ... on FormulaValue{display_value}
+                ... on StatusValue {label}
+                ... on DateValue   {date}
+              }
             }
-          }
-        }`);
+          }`,{ids:slice});
 
-      for (const it of (data.items || [])) {
-        const cv  = Object.fromEntries(it.column_values.map(c => [c.id, c]));
-        const num = toFloat(cv[FORMULA_COLUMN_ID]?.display_value);
-        if (num === null || Number.isNaN(num)) continue;
-
-        rows.push({
-          id   : it.id,
-          name : it.name,
-          status: cv[STATUS_COLUMN_ID]?.label ?? null,
-          type  : label,
-          installation_date: cv[DATE_COLUMN_ID]?.date ?? null,
-          sum_eur: num
-        });
-      }
+        return DATA.items.map(it=>{
+          const cv  = Object.fromEntries(it.column_values.map(c=>[c.id,c]));
+          const val = euStrToFloat(cv[FORMULA_COL_ID]?.display_value);
+          if(val==null || Number.isNaN(val)) return null;
+          return {
+            id : it.id,
+            name : it.name,
+            status : cv[STATUS_COLUMN_ID]?.label ?? null,
+            type : label,
+            installation_date : cv[DATE_COL_ID]?.date ?? null,
+            sum_eur : val
+          };
+        }).filter(Boolean);
+      });
     }
-    const total = rows.reduce((s, r) => s + r.sum_eur, 0);
+
+    const rows = (await limitConcurrency(4, jobs)).flat();
+
+    const total = rows.reduce((s,r)=>s+r.sum_eur,0);
     return {
-      meta: {
-        type: label,
-        total_items: rows.length,
-        total_sum_eur: +total.toFixed(2)
-      },
+      meta : { type:label, total_items:rows.length,
+               total_sum_eur:+total.toFixed(2)},
       items: rows
     };
   }
 
-  /* ---------- RUN ---------- */
-  try {
+  /* RUN --------------------------------------------------------- */
+  try{
     const [b2cIds, b2bIds] = await Promise.all([collectIds(1), collectIds(2)]);
-    const [b2c, b2b]       = await Promise.all([hydrate(b2cIds, 'B2C'),
-                                               hydrate(b2bIds, 'B2B')]);
-    res.status(200).json({ b2c, b2b });
-  } catch (err) {
+    const [b2c, b2b]       = await Promise.all([hydrate(b2cIds,'B2C'),
+                                               hydrate(b2bIds,'B2B')]);
+    res.status(200).json({b2c,b2b});
+  }catch(err){
     console.error(err);
-    res.status(500).json({ error: 'monday API error', details: err.message || err });
+    res.status(500).json({error:'monday API error',details:err.message||err});
   }
 }
