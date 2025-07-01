@@ -15,50 +15,67 @@ export default async function handler(req, res) {
     let allItems = [];
     let cursor = null;
 
-    while (true) {
-      const query = `
+    const initialQuery = `
+      query {
+        items_page_by_column_values(
+          board_id: ${BOARD_ID},
+          limit: 500,
+          columns: [
+            { column_id: "${STATUS_COLUMN_ID}", column_values: ["Įrengta", "Atsiskaityta"] },
+            { column_id: "${TYPE_COLUMN_ID}", column_values: ["${typeIndex === 1 ? 'B2C' : 'B2B'}"] }
+          ]
+        ) {
+          cursor
+          items { id name }
+        }
+      }
+    `;
+
+    const resPage = await fetch("https://api.monday.com/v2", {
+      method: "POST",
+      headers: {
+        Authorization: API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query: initialQuery }),
+    });
+
+    const text = await resPage.text();
+    const json = JSON.parse(text);
+    const pageData = json?.data?.items_page_by_column_values;
+
+    if (pageData?.items?.length) {
+      allItems.push(...pageData.items);
+      cursor = pageData.cursor;
+    }
+
+    while (cursor) {
+      const cursorQuery = `
         query {
-          boards(ids: ${BOARD_ID}) {
-            items_page(
-              limit: 500,
-              ${cursor ? `cursor: "${cursor}", query_params: {
-                rules: [
-                  { column_id: "${STATUS_COLUMN_ID}", compare_value: [1, 6], operator: any_of },
-                  { column_id: "${TYPE_COLUMN_ID}", compare_value: [${typeIndex}], operator: any_of }
-                ]
-              }` : `query_params: {
-                rules: [
-                  { column_id: "${STATUS_COLUMN_ID}", compare_value: [1, 6], operator: any_of },
-                  { column_id: "${TYPE_COLUMN_ID}", compare_value: [${typeIndex}], operator: any_of }
-                ]
-              }`}
-            ) {
-              cursor
-              items { id name }
-            }
+          next_items_page(cursor: "${cursor}", limit: 500) {
+            cursor
+            items { id name }
           }
         }
       `;
 
-      const resPage = await fetch("https://api.monday.com/v2", {
+      const resNext = await fetch("https://api.monday.com/v2", {
         method: "POST",
         headers: {
           Authorization: API_KEY,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query: cursorQuery }),
       });
 
-      const text = await resPage.text();
-      const json = JSON.parse(text);
-      const data = json?.data?.boards?.[0]?.items_page;
+      const textNext = await resNext.text();
+      const jsonNext = JSON.parse(textNext);
+      const nextData = jsonNext?.data?.next_items_page;
 
-      if (!data?.items?.length) break;
+      if (!nextData?.items?.length) break;
 
-      allItems.push(...data.items);
-      if (!data.cursor) break;
-
-      cursor = data.cursor;
+      allItems.push(...nextData.items);
+      cursor = nextData.cursor;
     }
 
     return allItems.map((item) => item.id);
