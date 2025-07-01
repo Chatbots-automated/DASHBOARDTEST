@@ -1,7 +1,7 @@
 export default async function handler(req, res) {
   const API_KEY = process.env.MONDAY_API_KEY;
   const BOARD_ID = 1645436514;
-  const STATUS_COLUMN_ID = "status"; // change this if your column ID is different
+  const STATUS_COLUMN_ID = "status";
   const TOTAL_SUM_COLUMN_ID = "lookup_mks65gxc";
 
   const query = `
@@ -13,7 +13,7 @@ export default async function handler(req, res) {
             rules: [
               {
                 column_id: "${STATUS_COLUMN_ID}",
-                compare_value: ["Įrengta", "Atsiskaityta su partneriais."],
+                compare_value: ["Įrengta", "Atsiskaityta su partneriu"],
                 operator: any_of
               }
             ]
