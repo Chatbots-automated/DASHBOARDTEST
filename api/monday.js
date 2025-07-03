@@ -1,18 +1,18 @@
 /**
- * /api/monday.js  – pulls EVERY-thing every call
- * Groups new_group50055 | new_group89286
+ * /api/monday.js – pulls EVERYTHING every call
+ * Groups  new_group50055 | new_group89286
  * Buckets status6 →  B2C · B2B · Other
  * Returns { fetched_at, b2c, b2b, other }
  */
 export default async function handler (req, res) {
-  /* CORS, no-cache */
+  /* CORS & no-cache */
   res.setHeader('Access-Control-Allow-Origin','*');
   res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization, x-api-key');
   if (req.method === 'OPTIONS') return res.status(200).end();
   res.setHeader('Cache-Control','no-store'); res.setHeader('Pragma','no-cache');
 
-  /* simple shared-secret */
+  /* API-key guard */
   const CLIENT_API_KEY = process.env.CLIENT_API_KEY;
   const supplied = (req.headers.authorization||'').match(/^Bearer\s+(.+)$/i)?.[1]
                 || req.headers.authorization
@@ -38,11 +38,11 @@ export default async function handler (req, res) {
 
   const COL_IDS = [
     NUMBER_COL, TYPE_COL, DATE_COL,
-    SAVIK_COL, PROFIT_COL,
-    HOUSE_COL, INST_COL
+    SAVIK_COL,  PROFIT_COL,
+    HOUSE_COL,  INST_COL
   ];
 
-  /* low-level GQL helper with back-off (+ field-limit) */
+  /* low-level GQL helper */
   const HEADERS = { Authorization: MONDAY_KEY, 'Content-Type':'application/json' };
   const gql = async (label, query, variables) => {
     let wait = 1_000;
@@ -51,12 +51,12 @@ export default async function handler (req, res) {
         method:'POST', headers:HEADERS,
         body:JSON.stringify(variables?{query,variables}:{query})
       });
-      if (r.status === 429) {              // HTTP-level throttle
+      if (r.status === 429) {                     // HTTP throttle
         await new Promise(t=>setTimeout(t,wait)); wait=Math.min(wait*2,30_000); continue;
       }
       const j = await r.json();
-      const e = j.errors?.[0]; const code=e?.extensions?.code||'';
-      if (code==='FIELD_MINUTE_RATE_LIMIT_EXCEEDED') {
+      const e = j.errors?.[0]; const code = e?.extensions?.code || '';
+      if (code === 'FIELD_MINUTE_RATE_LIMIT_EXCEEDED') {
         await new Promise(t=>setTimeout(t,(+e.extensions.retry_in_seconds||5)*1000));
         continue;
       }
@@ -77,7 +77,7 @@ export default async function handler (req, res) {
         ... on NumbersValue  { number text }
         ... on FormulaValue  { display_value }
         ... on StatusValue   { label }
-        ... on DropdownValue { text values { name } }
+        ... on DropdownValue { text }
         ... on DateValue     { date }
         text`;
   const Q_FIRST = `
@@ -113,7 +113,7 @@ export default async function handler (req, res) {
       }
     }`;
 
-  /* pull one group */
+  /* pull one group (items + subitems) */
   const fetchGroup = async gid => {
     const out=[], add=l=>l.forEach(i=>{out.push(i); if(i.subitems)out.push(...i.subitems);});
     let p=(await gql(`first ${gid}`,Q_FIRST,{bid:[BOARD_ID],gid})).boards[0].groups[0].items_page;
@@ -136,9 +136,7 @@ export default async function handler (req, res) {
         savikaina_eur:toNumber(null,cv[SAVIK_COL ]?.display_value),
         profit_pct   :toNumber(null,cv[PROFIT_COL]?.display_value),
         household_type:cv[HOUSE_COL]?.label??null,
-        installer     :cv[INST_COL]?.values?.[0]?.name     // first dropdown label
-                     ?? cv[INST_COL]?.text                 // whole text string
-                     ?? null
+        installer     :cv[INST_COL]?.text ?? null           // dropdown labels
       });
     }
   }
