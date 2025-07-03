@@ -4,11 +4,11 @@
  * Buckets status6 → B2C · B2B · Other
  * Returns: { fetched_at, b2c, b2b, other }
  */
-export default async function handler(req, res) {
-  /* ── CORS ───────────────────────────────── */
-  res.setHeader('Access-Control-Allow-Origin', '*');
+export default async function handler (req, res) {
+  /* ── CORS ─────────────────────────────── */
+  res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization, x-api-key');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   /* ── NEVER CACHE ───────────────────────── */
@@ -16,17 +16,19 @@ export default async function handler(req, res) {
   res.setHeader('Pragma',        'no-cache');
 
   /* ── SHARED-SECRET GUARD ───────────────── */
-  const CLIENT_API_KEY = process.env.CLIENT_API_KEY;          // <-- set in .env
-  const suppliedKey    = req.headers['authorization'] || req.headers['x-api-key'];
+  const CLIENT_API_KEY = process.env.CLIENT_API_KEY;   // << put in .env
+  const rawHeader      = req.headers['authorization'] || '';
+  const bearerMatch    = rawHeader.match(/^Bearer\s+(.+)$/i);
+  const suppliedKey    = bearerMatch ? bearerMatch[1] : (rawHeader || req.headers['x-api-key']);
+
   if (!CLIENT_API_KEY || suppliedKey !== CLIENT_API_KEY) {
+    console.warn('🔒  API-key check failed – supplied =', suppliedKey);
     return res.status(401).json({ error: 'Unauthorized – bad or missing API key' });
   }
 
-  /* ── MONDAY TOKEN ──────────────────────── */
+  /* ── MONDAY TOKEN ─────────────────────── */
   const MONDAY_KEY = process.env.MONDAY_API_KEY;
-  if (!MONDAY_KEY) {
-    return res.status(500).json({ error: 'MONDAY_API_KEY missing' });
-  }
+  if (!MONDAY_KEY) return res.status(500).json({ error: 'MONDAY_API_KEY missing' });
 
   /* ── IDs / columns ─────────────────────── */
   const BOARD_ID   = 1645436514;
@@ -36,69 +38,65 @@ export default async function handler(req, res) {
   const DATE_COL   = 'date8';
   const VALID_TYPES = new Set(['B2C', 'B2B']);
 
-  /* ── GQL helper with back-off ──────────── */
+  /* ── GraphQL helper with back-off ──────── */
   const HEADERS = { Authorization: MONDAY_KEY, 'Content-Type': 'application/json' };
-  async function gql(label, query, variables) {
-    const body = variables ? { query, variables } : { query };
-    let wait = 1_000;
+  async function gql(label, query, vars) {
+    let wait = 1_000;                                  // 1 s → 2 s → … → 30 s
     for (;;) {
-      const r = await fetch('https://api.monday.com/v2', { method:'POST', headers:HEADERS, body:JSON.stringify(body) });
-      if (r.status === 429) {                       // HTTP-level rate limit
+      const rsp = await fetch('https://api.monday.com/v2', {
+        method:'POST', headers:HEADERS, body:JSON.stringify(vars ? {query,variables:vars}:{query})
+      });
+      if (rsp.status === 429) {                        // HTTP-level limit
         console.warn(`⏳ ${label} 429 – retry in ${wait/1e3}s`);
         await new Promise(t => setTimeout(t, wait));
-        wait = Math.min(wait * 2, 30_000);
+        wait = Math.min(wait*2, 30_000);
         continue;
       }
-      const j = await r.json();
-      const err = j.errors?.[0];
+      const j = await rsp.json();
+      const err  = j.errors?.[0];
       const code = err?.extensions?.code || '';
-      if (code.includes('Complexity') || code.includes('MINUTE_LIMIT') || code.includes('DAILY_LIMIT')) {
+      if (code.match(/Complexity|MINUTE_LIMIT|DAILY_LIMIT/)) {
         console.warn(`⏳ ${label} ${code} – retry in ${wait/1e3}s`);
         await new Promise(t => setTimeout(t, wait));
-        wait = Math.min(wait * 2, 30_000);
+        wait = Math.min(wait*2, 30_000);
         continue;
       }
       if (j.errors) {
-        console.error(`💥 ${label}`, JSON.stringify(j.errors, null, 2));
+        console.error(`💥 ${label}`, JSON.stringify(j.errors,null,2));
         throw new Error('monday API fatal');
       }
       return j.data;
     }
   }
 
-  /* ── utils ─────────────────────────────── */
+  /* ── util – robust number parse ────────── */
   const toNumber = (n, txt) =>
-    typeof n === 'number' ? n : Number(txt?.replace(/[^\d.,-]/g,'').replace(',','.')) || 0;
+      typeof n === 'number' ? n
+                            : Number(txt?.replace(/[^\d.,-]/g,'').replace(',','.')) || 0;
 
-  /* ── 1️⃣ fetch one group (items + subitems) ─ */
-  async function fetchGroupItems(gid) {
+  /* ── 1️⃣  fetch one group (items + subitems) ─ */
+  async function fetchGroupItems(gid){
     const items = [];
-    const HARVEST = arr => arr.forEach(it => {
+    const harvest = arr => arr.forEach(it=>{
       items.push(it);
       if (it.subitems?.length) items.push(...it.subitems);
     });
 
-    let page = (await gql(
-      `first items_page ${gid}`,
-      QUERY_FIRST_PAGE,
-      { bid:[BOARD_ID], gid }
-    )).boards[0].groups[0].items_page;
-    HARVEST(page.items);
+    let page = (await gql(`first items_page ${gid}`, QUERY_FIRST_PAGE, {bid:[BOARD_ID],gid}))
+                 .boards[0].groups[0].items_page;
+    harvest(page.items);
 
     while (page.cursor) {
-      page = (await gql(
-        `next_items_page ${gid}`,
-        QUERY_NEXT_PAGE,
-        { c: page.cursor }
-      )).next_items_page;
-      HARVEST(page.items);
+      page = (await gql(`next_items_page ${gid}`, QUERY_NEXT_PAGE, {c:page.cursor}))
+               .next_items_page;
+      harvest(page.items);
     }
     return items;
   }
 
-  /* ── 2️⃣ aggregate & bucket ─────────────── */
-  const bucket = { B2C:[], B2B:[], Other:[] };
-  const seen = new Set();
+  /* ── 2️⃣  aggregate & bucket ───────────── */
+  const bucket = {B2C:[], B2B:[], Other:[]};
+  const seen   = new Set();
 
   for (const gid of GROUP_IDS) {
     const rows = await fetchGroupItems(gid);
@@ -106,33 +104,29 @@ export default async function handler(req, res) {
       if (seen.has(it.id)) continue;
       seen.add(it.id);
 
-      const cv = Object.fromEntries(it.column_values.map(c=>[c.id,c]));
-      const lbl = cv[TYPE_COL]?.label;
+      const cv   = Object.fromEntries(it.column_values.map(c=>[c.id,c]));
+      const lbl  = cv[TYPE_COL]?.label;
       const type = VALID_TYPES.has(lbl) ? lbl : 'Other';
       const num  = toNumber(cv[NUMBER_COL]?.number, cv[NUMBER_COL]?.text);
 
       bucket[type].push({
-        id: it.id,
-        name: it.name,
-        type,
-        installation_date: cv[DATE_COL]?.date ?? null,
-        sum_eur: num
+        id:it.id, name:it.name, type,
+        installation_date:cv[DATE_COL]?.date ?? null,
+        sum_eur:num
       });
     }
   }
 
-  /* ── 3️⃣ respond ───────────────────────── */
-  const pack = t => {
-    const arr = bucket[t];
-    const tot = arr.reduce((s,r)=>s+r.sum_eur,0);
-    return { meta:{type:t,total_items:arr.length,total_sum_eur:+tot.toFixed(2)}, items:arr };
+  /* ── 3️⃣  respond ───────────────────────── */
+  const pack = k =>{
+    const arr=bucket[k];
+    const tot=arr.reduce((s,r)=>s+r.sum_eur,0);
+    return {meta:{type:k,total_items:arr.length,total_sum_eur:+tot.toFixed(2)}, items:arr};
   };
 
   res.status(200).json({
-    fetched_at: new Date().toISOString(),
-    b2c  : pack('B2C'),
-    b2b  : pack('B2B'),
-    other: pack('Other')
+    fetched_at:new Date().toISOString(),
+    b2c:pack('B2C'), b2b:pack('B2B'), other:pack('Other')
   });
 }
 
